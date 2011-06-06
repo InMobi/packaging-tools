@@ -1,0 +1,123 @@
+#!/usr/bin/perl
+#
+# $Id$
+#
+# vim: set ts=2 sw=2 expandtab:
+#
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Path qw(remove_tree);
+use YAML::Syck;
+use Data::Dumper;
+
+my %opts;
+GetOptions( \%opts,
+  'verbose',
+  'gen',
+);
+
+my $CONF = 'config.yaml';
+
+if (!-f $CONF) {
+  die "Nothing to build here\n";
+}
+
+my $conf = LoadFile($CONF);
+print "Loaded config file $CONF\n" if $opts{verbose};
+my $now = time;
+my $package   = $conf->{package};
+my $version   = $conf->{version} . "-$now";
+my $arch      = $conf->{arch};
+my $desc      = $conf->{description};
+my $maint     = $conf->{maintainer};
+my $section   = $conf->{section};
+my $origin    = 'InMobi';
+my $deb       = sprintf("%s_%s_%s.deb", $package, $version, $arch);
+
+my $priority    = $conf->{priority};
+my $predepends  = $conf->{predepends};
+my $depends     = $conf->{depends};
+
+#if (!$predepends) {
+  #$predepends = 'none';
+#}
+
+if (!$priority) {
+  $priority = 'optional';
+}
+
+if (create_control()) {
+  if (create_deb()) {
+    print "create_deb $deb OK\n";
+  }
+  delete_control() unless $opts{gen};
+} else {
+  print "Failed to create control file. Please check\n";
+}
+
+sub create_control {
+  if (-d "DEBIAN") {
+    die "Please clear DEBIAN runtime directory before rebuilding\n";
+  }
+  mkdir "DEBIAN" || die "Failed to create DEBIAN/ runtime directory: $!\n";
+  open (CONTROL, ">DEBIAN/control") || die "Failed to create DEBIAN/control file: $!\n";
+  print CONTROL <<EOT;
+Package: $package
+Version: $version
+Architecture: $arch
+Description: $desc
+Maintainer: $maint
+Origin: $origin
+Priority: $priority
+Section: $section
+EOT
+
+  if ($predepends) {
+    print CONTROL "Pre-Depends: $predepends\n";
+  }
+  if ($depends) {
+    print CONTROL "Depends: $depends\n";
+  }
+  close (CONTROL);
+
+  create_hook("postinst", $conf->{postinst}) if $conf->{postinst};
+  create_hook("preinst", $conf->{preinst}) if $conf->{preinst};
+  create_hook("prerm", $conf->{prerm}) if $conf->{prerm};
+  create_hook("postrm", $conf->{postrm}) if $conf->{postrm};
+    
+  if (-f "DEBIAN/control") {
+    return 1;
+  }
+  return;
+}
+
+sub create_hook {
+  my ($hook, $data) = @_;
+  my $file = ">DEBIAN/$hook";
+  
+  open(FILE, $file) || die "Failed to create file $file: $!\n";
+  print FILE $data;
+  close(FILE) || die "Failed to close file $file: $!\n";
+  chmod 0755, $file;
+  return 1;
+}
+
+sub delete_control {
+  print "Cleaning up...\n" if $opts{verbose};
+  if (!remove_tree("./DEBIAN")) {
+    die "Failed to remove runtime directory ./DEBIAN/: $!\n";
+  }
+}
+  
+sub create_deb {
+  my $TMPDIR = `mktemp -d`; chomp $TMPDIR;
+  `tar zcf - --exclude '.svn' --exclude './*.deb' --exclude "./config.yaml" . | tar zxvf - -C $TMPDIR`;
+  `chmod -f 0755 $TMPDIR/DEBIAN/pre* $TMPDIR/DEBIAN/post*`;
+  my @ARGS = ( "fakeroot", "dpkg-deb", "--build", $TMPDIR, $deb );
+  print "@ARGS\n";
+  if (system(@ARGS) == 0) {
+    return 1; # success
+  }
+  return;
+}
